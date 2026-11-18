@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<script type="application/json" id="cowork-artifact-meta">
+{
+  "name": "Account Coverage",
+  "schemaVersion": 1,
+  "description": "Dashboard de cobertura de contas com filtro por tier (Account.Rating): total, tocadas (Call: Connect ou Customer Meeting no FY atual), não tocadas e % de cobertura, do Salesforce.",
+  "mcpTools": [
+    "mcp__de4a5a83-ad58-4919-9ad7-8d71f35b0672__dispatch_readonly"
+  ],
+  "mcpServerNames": [
+    "Salesforce - Beta"
+  ]
+}
+</script>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cobertura de Contas</title>
+<style>
+  :root { color-scheme: light; --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --bg:#f8fafc; --blue:#0b5cab; --green:#1a9d6b; --red:#d9534f; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px; background:var(--bg); color:var(--ink); font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  h1 { margin:0 0 2px; font-size:22px; }
+  .sub { color:var(--muted); margin-bottom:16px; }
+  .chips { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:14px; }
+  .chips .lbl { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; margin-right:4px; }
+  .chip { padding:6px 12px; border:1px solid var(--line); background:#fff; border-radius:16px; cursor:pointer; font-size:13px; }
+  .chip.on { background:var(--blue); color:#fff; border-color:var(--blue); }
+  .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:16px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .card .l { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  .card .v { font-size:32px; font-weight:700; margin-top:4px; }
+  .v.g { color:var(--green); } .v.r { color:var(--red); } .v.b { color:var(--blue); }
+  .row { display:grid; grid-template-columns:260px 1fr; gap:12px; margin-bottom:16px; }
+  .chart { height:220px; position:relative; }
+  .bar { height:14px; background:#eef2f7; border-radius:7px; overflow:hidden; margin:10px 0 6px; }
+  .bar > div { height:100%; background:var(--green); width:0; transition:width .6s; }
+  .tabs { display:flex; gap:8px; margin-bottom:10px; align-items:center; }
+  .tab { padding:6px 12px; border:1px solid var(--line); background:#fff; border-radius:16px; cursor:pointer; font-size:13px; }
+  .tab.on { background:var(--blue); color:#fff; border-color:var(--blue); }
+  input { margin-left:auto; padding:6px 10px; border:1px solid var(--line); border-radius:8px; width:200px; font-size:13px; }
+  table { width:100%; border-collapse:collapse; background:#fff; border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  th, td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--line); font-size:13px; }
+  th { background:#f1f5f9; color:var(--muted); font-weight:600; cursor:pointer; user-select:none; }
+  tr:last-child td { border-bottom:none; }
+  a { color:var(--blue); text-decoration:none; } a:hover { text-decoration:underline; }
+  .note { color:var(--muted); font-size:12px; margin-top:10px; }
+  .err { color:var(--red); padding:12px; background:#fff; border:1px solid var(--red); border-radius:8px; }
+  .bytier { margin-bottom:16px; }
+  .bytier h3 { margin:0 0 8px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .bytier table td, .bytier table th { cursor:default; }
+  .mini { display:inline-block; width:90px; height:8px; background:#eef2f7; border-radius:4px; overflow:hidden; vertical-align:middle; margin-right:6px; }
+  .mini > i { display:block; height:100%; background:var(--green); }
+  @media (max-width:640px) { .grid { grid-template-columns:repeat(2,1fr); } .row { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<h1>Cobertura de Contas</h1>
+<div class="sub">Contas sob minha titularidade com ao menos um <b>Call: Connect</b> ou <b>Customer Meeting</b> no FY atual.</div>
+<div id="app">Carregando dados do Salesforce…</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.js" integrity="sha384-iU8HYtnGQ8Cy4zl7gbNMOhsDTTKX02BTXptVP/vqAWIaTfM7isw76iyZCsjL2eVi" crossorigin="anonymous"></script>
+<script>
+const TOOL = "mcp__de4a5a83-ad58-4919-9ad7-8d71f35b0672__dispatch_readonly";
+const USER_ID = "0053y00000E0e1cAAB";
+const SF = "https://org62.my.salesforce.com/";
+const NO_TIER = "Sem tier";
+
+async function soql(q) {
+  const r = await window.cowork.callMcpTool(TOOL, {
+    url: "/services/data/v66.0/query", method: "GET", queryParams: { q }, userType: "business"
+  });
+  if (r.isError) throw new Error(r.content[0].text);
+  const d = r.structuredContent ?? JSON.parse(r.content[0].text);
+  return d.body.records;
+}
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+(async () => {
+  const app = document.getElementById("app");
+  try {
+    const [accounts, tasks] = await Promise.all([
+      soql(`SELECT Id, Name, Rating FROM Account WHERE OwnerId = '${USER_ID}' ORDER BY Name LIMIT 2000`),
+      soql(`SELECT AccountId, Type, ActivityDate FROM Task WHERE OwnerId = '${USER_ID}' AND Type IN ('Call: Connect','Customer Meeting') AND ActivityDate = THIS_FISCAL_YEAR AND AccountId != null ORDER BY ActivityDate DESC LIMIT 2000`)
+    ]);
+
+    const touch = {};
+    tasks.forEach(t => {
+      const o = touch[t.AccountId] ??= { n:0, calls:0, meetings:0, last:t.ActivityDate };
+      o.n++; if (t.Type === "Call: Connect") o.calls++; else o.meetings++;
+      if (t.ActivityDate > o.last) o.last = t.ActivityDate;
+    });
+    const rows = accounts.map(a => ({ id:a.Id, name:a.Name, tier:a.Rating || NO_TIER, ...(touch[a.Id] || { n:0, calls:0, meetings:0, last:"" }) }));
+    const owned = new Set(rows.map(r => r.id));
+    const outside = Object.keys(touch).filter(id => !owned.has(id)).length;
+    const tiers = [...new Set(rows.map(r => r.tier))].sort((a,b) => a === NO_TIER ? 1 : b === NO_TIER ? -1 : a.localeCompare(b, "pt", { numeric:true }));
+
+    app.innerHTML = `
+      <div class="chips"><span class="lbl">Tier</span><span class="chip on" data-tier="all">Todos (${rows.length})</span>
+        ${tiers.map(t => `<span class="chip" data-tier="${esc(t)}">${esc(t)} (${rows.filter(r => r.tier === t).length})</span>`).join("")}</div>
+      <div class="grid">
+        <div class="card"><div class="l">Total de contas</div><div class="v b" id="k-total"></div></div>
+        <div class="card"><div class="l">Contas tocadas</div><div class="v g" id="k-t"></div></div>
+        <div class="card"><div class="l">Não tocadas</div><div class="v r" id="k-u"></div></div>
+        <div class="card"><div class="l">% de cobertura</div><div class="v" id="k-p"></div>
+          <div class="bar"><div id="fill"></div></div></div>
+      </div>
+      <div class="bytier"><h3>Cobertura por tier</h3><div id="bytier"></div></div>
+      <div class="row">
+        <div class="card"><div class="chart"><canvas id="ch"></canvas></div></div>
+        <div class="card">
+          <div class="tabs">
+            <span class="tab on" data-t="u" id="tab-u"></span>
+            <span class="tab" data-t="t" id="tab-t"></span>
+            <input id="q" placeholder="Filtrar por nome…">
+          </div>
+          <div id="tbl"></div>
+        </div>
+      </div>
+      <div class="note">Fonte: Salesforce (Account.Rating como tier; Task.Type = Call: Connect ou Customer Meeting, FY atual). ${outside ? `${outside} conta(s) fora da sua carteira também tiveram toques e não entram na conta.` : ""}</div>`;
+
+    // cobertura por tier (sempre mostra todos os tiers)
+    document.getElementById("bytier").innerHTML = `<table><thead><tr><th>Tier</th><th>Total</th><th>Tocadas</th><th>Não tocadas</th><th>Cobertura</th></tr></thead><tbody>${
+      tiers.map(t => { const g = rows.filter(r => r.tier === t), tc = g.filter(r => r.n > 0).length, p = g.length ? tc / g.length * 100 : 0;
+        return `<tr><td>${esc(t)}</td><td>${g.length}</td><td>${tc}</td><td>${g.length - tc}</td><td><span class="mini"><i style="width:${p}%"></i></span>${p.toFixed(1)}%</td></tr>`; }).join("")
+    }</tbody></table>`;
+
+    const chart = new Chart(document.getElementById("ch"), {
+      type: "doughnut",
+      data: { labels:["Tocadas","Não tocadas"], datasets:[{ data:[0,0], backgroundColor:["#1a9d6b","#d9534f"], borderWidth:0 }] },
+      options: { responsive:true, maintainAspectRatio:false, cutout:"65%", plugins:{ legend:{ position:"bottom" } } }
+    });
+
+    let tier = "all", tab = "u", sortKey = null, sortDir = 1;
+    const scoped = () => tier === "all" ? rows : rows.filter(r => r.tier === tier);
+
+    function render() {
+      const sc = scoped(), touched = sc.filter(r => r.n > 0), untouched = sc.filter(r => r.n === 0);
+      const pct = sc.length ? touched.length / sc.length * 100 : 0;
+      document.getElementById("k-total").textContent = sc.length;
+      document.getElementById("k-t").textContent = touched.length;
+      document.getElementById("k-u").textContent = untouched.length;
+      document.getElementById("k-p").textContent = pct.toFixed(1) + "%";
+      document.getElementById("fill").style.width = pct + "%";
+      document.getElementById("tab-u").textContent = `Não tocadas (${untouched.length})`;
+      document.getElementById("tab-t").textContent = `Tocadas (${touched.length})`;
+      chart.data.datasets[0].data = [touched.length, untouched.length]; chart.update();
+
+      const q = document.getElementById("q").value.toLowerCase();
+      let list = (tab === "u" ? untouched : touched).filter(r => r.name.toLowerCase().includes(q));
+      if (tab === "t" && !sortKey) list = [...list].sort((a,b) => b.n - a.n);
+      if (sortKey) list = [...list].sort((a,b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
+      const head = tab === "u"
+        ? `<tr><th data-k="name">Conta</th><th data-k="tier">Tier</th></tr>`
+        : `<tr><th data-k="name">Conta</th><th data-k="tier">Tier</th><th data-k="calls">Call: Connect</th><th data-k="meetings">Customer Meeting</th><th data-k="last">Último toque</th></tr>`;
+      const body = list.map(r => `<tr><td><a href="${SF}${r.id}" target="_blank">${esc(r.name)}</a></td><td>${esc(r.tier)}</td>${
+        tab === "u" ? "" : `<td>${r.calls}</td><td>${r.meetings}</td><td>${r.last}</td>`}</tr>`).join("");
+      document.getElementById("tbl").innerHTML = `<table><thead>${head}</thead><tbody>${body || '<tr><td>Nenhuma conta.</td></tr>'}</tbody></table>`;
+      document.querySelectorAll("th[data-k]").forEach(th => th.onclick = () => {
+        sortDir = sortKey === th.dataset.k ? -sortDir : 1; sortKey = th.dataset.k; render();
+      });
+    }
+
+    document.querySelectorAll(".chip").forEach(el => el.onclick = () => {
+      document.querySelectorAll(".chip").forEach(x => x.classList.remove("on"));
+      el.classList.add("on"); tier = el.dataset.tier; render();
+    });
+    document.querySelectorAll(".tab").forEach(el => el.onclick = () => {
+      document.querySelectorAll(".tab").forEach(x => x.classList.remove("on"));
+      el.classList.add("on"); tab = el.dataset.t; sortKey = null; render();
+    });
+    document.getElementById("q").oninput = render;
+    render();
+  } catch (e) {
+    console.error(e);
+    app.innerHTML = `<div class="err">Erro ao carregar: ${esc(e.message)}</div>`;
+  }
+})();
+</script>
+</body>
+</html>
